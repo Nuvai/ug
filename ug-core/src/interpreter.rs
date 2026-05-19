@@ -89,6 +89,48 @@ impl<T: num::traits::Num + Copy + MinMax, const N: usize> W<T, N> {
     }
 }
 
+impl<const N: usize> W<f32, N> {
+    fn cmp_eq(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] == rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+    fn cmp_ne(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] != rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+    fn cmp_lt(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] < rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+    fn cmp_le(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] <= rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+    fn cmp_gt(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] > rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+    fn cmp_ge(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] >= rhs.0[i] { 1.0 } else { 0.0 }))
+    }
+}
+
+impl<const N: usize> W<i32, N> {
+    fn cmp_eq_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] == rhs.0[i] { 1 } else { 0 }))
+    }
+    fn cmp_ne_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] != rhs.0[i] { 1 } else { 0 }))
+    }
+    fn cmp_lt_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] < rhs.0[i] { 1 } else { 0 }))
+    }
+    fn cmp_le_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] <= rhs.0[i] { 1 } else { 0 }))
+    }
+    fn cmp_gt_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] > rhs.0[i] { 1 } else { 0 }))
+    }
+    fn cmp_ge_i(&self, rhs: &Self) -> Self {
+        W(std::array::from_fn(|i| if self.0[i] >= rhs.0[i] { 1 } else { 0 }))
+    }
+}
+
 impl<T: Copy, const N: usize> W<T, N> {
     fn splat(v: T) -> Self {
         W([v; N])
@@ -343,6 +385,24 @@ pub fn eval_ssa<const N: usize>(
                     (B::Min, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.min(v2)),
                     (B::Min, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.min(v2)),
                     (B::Min, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Eq, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_eq(v2)),
+                    (B::Eq, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_eq_i(v2)),
+                    (B::Eq, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Ne, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_ne(v2)),
+                    (B::Ne, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_ne_i(v2)),
+                    (B::Ne, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Lt, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_lt(v2)),
+                    (B::Lt, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_lt_i(v2)),
+                    (B::Lt, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Le, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_le(v2)),
+                    (B::Le, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_le_i(v2)),
+                    (B::Le, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Gt, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_gt(v2)),
+                    (B::Gt, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_gt_i(v2)),
+                    (B::Gt, _, _) => crate::bail!("dtype mismatch for {op:?}"),
+                    (B::Ge, Value::F32(v1), Value::F32(v2)) => Value::F32(v1.cmp_ge(v2)),
+                    (B::Ge, Value::I32(v1), Value::I32(v2)) => Value::I32(v1.cmp_ge_i(v2)),
+                    (B::Ge, _, _) => crate::bail!("dtype mismatch for {op:?}"),
                 };
                 (v, None)
             }
@@ -388,6 +448,10 @@ pub fn eval_ssa<const N: usize>(
                 (Value::I32(W(std::array::from_fn(|i| i as i32))), None)
             }
             Instr::Special(ssa::Special::BlockIdx) => (Value::I32(W::splat(grid_idx as i32)), None),
+            Instr::Special(ssa::Special::ThreadIdxY)
+            | Instr::Special(ssa::Special::ThreadIdxZ)
+            | Instr::Special(ssa::Special::BlockIdxY)
+            | Instr::Special(ssa::Special::BlockIdxZ) => (Value::I32(W::splat(0)), None),
             Instr::Barrier => (Value::None, None),
             Instr::ReduceLocal { op, arg, dtype: _ } => {
                 use crate::lang::ssa::ReduceOp as R;
@@ -408,6 +472,30 @@ pub fn eval_ssa<const N: usize>(
                         Value::I32(W::splat(v.0.iter().cloned().min().unwrap_or(i32::MAX)))
                     }
                     (_, _) => crate::bail!("dtype mismatch for {op:?} {arg:?}"),
+                };
+                (v, None)
+            }
+            Instr::Where { cond, on_true, on_false, dtype: _ } => {
+                let cond = context.get(*cond)?;
+                let on_true = context.get(*on_true)?;
+                let on_false = context.get(*on_false)?;
+                let v = match (&cond, &on_true, &on_false) {
+                    (Value::F32(c), Value::F32(t), Value::F32(f)) => {
+                        Value::F32(W(std::array::from_fn(|i| {
+                            if c.0[i] != 0.0 { t.0[i] } else { f.0[i] }
+                        })))
+                    }
+                    (Value::I32(c), Value::I32(t), Value::I32(f)) => {
+                        Value::I32(W(std::array::from_fn(|i| {
+                            if c.0[i] != 0 { t.0[i] } else { f.0[i] }
+                        })))
+                    }
+                    (Value::I32(c), Value::F32(t), Value::F32(f)) => {
+                        Value::F32(W(std::array::from_fn(|i| {
+                            if c.0[i] != 0 { t.0[i] } else { f.0[i] }
+                        })))
+                    }
+                    _ => crate::bail!("dtype mismatch for where {cond:?} {on_true:?} {on_false:?}"),
                 };
                 (v, None)
             }

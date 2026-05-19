@@ -286,49 +286,97 @@ impl crate::Device for CpuDevice {
     }
 
     fn run(&self, f: &Self::Func, args: &mut [&mut Self::Slice]) -> Result<()> {
-        use libloading::Symbol as S;
         use std::ffi::c_void;
 
         let func_name = f.func_name.as_bytes();
-        // TODO: For the calls below to be safe, we should store the kernel signature in Func
-        // and check that args matches it.
-        match args {
-            [] => {
-                let symbol: S<extern "C" fn()> = unsafe { f.lib.get(func_name)? };
-                symbol()
+        let ptrs: Vec<*mut c_void> = args.iter_mut().map(|a| a.as_mut_ptr()).collect();
+        unsafe {
+            match ptrs.len() {
+                0 => {
+                    let sym: libloading::Symbol<extern "C" fn()> = f.lib.get(func_name)?;
+                    sym()
+                }
+                1 => {
+                    let sym: libloading::Symbol<extern "C" fn(*mut c_void)> =
+                        f.lib.get(func_name)?;
+                    sym(ptrs[0])
+                }
+                2 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(*mut c_void, *mut c_void),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1])
+                }
+                3 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(*mut c_void, *mut c_void, *mut c_void),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1], ptrs[2])
+                }
+                4 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1], ptrs[2], ptrs[3])
+                }
+                5 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4])
+                }
+                6 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4], ptrs[5])
+                }
+                7 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ),
+                    > = f.lib.get(func_name)?;
+                    sym(ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6])
+                }
+                8 => {
+                    let sym: libloading::Symbol<
+                        extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ),
+                    > = f.lib.get(func_name)?;
+                    sym(
+                        ptrs[0], ptrs[1], ptrs[2], ptrs[3], ptrs[4], ptrs[5], ptrs[6], ptrs[7],
+                    )
+                }
+                n => crate::bail!("unsupported number of args for kernel: {n}"),
             }
-            [a1] => {
-                let symbol: S<extern "C" fn(*mut c_void)> = unsafe { f.lib.get(func_name)? };
-                symbol(a1.as_mut_ptr())
-            }
-            [a1, a2] => {
-                let symbol: S<extern "C" fn(*mut c_void, *mut c_void)> =
-                    unsafe { f.lib.get(func_name)? };
-                symbol(a1.as_mut_ptr(), a2.as_mut_ptr())
-            }
-            [a1, a2, a3] => {
-                let symbol: S<extern "C" fn(*mut c_void, *mut c_void, *mut c_void)> =
-                    unsafe { f.lib.get(func_name)? };
-                symbol(a1.as_mut_ptr(), a2.as_mut_ptr(), a3.as_mut_ptr())
-            }
-            [a1, a2, a3, a4] => {
-                let symbol: S<extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void)> =
-                    unsafe { f.lib.get(func_name)? };
-                symbol(a1.as_mut_ptr(), a2.as_mut_ptr(), a3.as_mut_ptr(), a4.as_mut_ptr())
-            }
-            [a1, a2, a3, a4, a5] => {
-                let symbol: S<
-                    extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void),
-                > = unsafe { f.lib.get(func_name)? };
-                symbol(
-                    a1.as_mut_ptr(),
-                    a2.as_mut_ptr(),
-                    a3.as_mut_ptr(),
-                    a4.as_mut_ptr(),
-                    a5.as_mut_ptr(),
-                )
-            }
-            _ => crate::bail!("unsupported number of args for kernel {}", args.len()),
         }
         Ok(())
     }

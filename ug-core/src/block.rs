@@ -206,6 +206,12 @@ impl Block {
                     SsaI::DefineGlobal { index: *index, dtype: *dtype }
                 }
                 SsaI::Barrier => SsaI::Barrier,
+                SsaI::Where { cond, on_true, on_false, dtype } => {
+                    let cond = get_a(*cond)?;
+                    let on_true = get_a(*on_true)?;
+                    let on_false = get_a(*on_false)?;
+                    SsaI::Where { cond, on_true, on_false, dtype: *dtype }
+                }
                 SsaI::ReduceLocal { op, arg, dtype } => {
                     let arg = get_a(*arg)?;
                     SsaI::ReduceLocal { op: *op, arg, dtype: *dtype }

@@ -33,6 +33,17 @@ impl NormalizedKernel {
                     let rhs = walk(rhs, arg_map)?;
                     op::binary(*op, lhs, rhs)
                 }
+                A::Where { cond, on_true, on_false } => {
+                    let cond = walk(cond, arg_map)?;
+                    let on_true = walk(on_true, arg_map)?;
+                    let on_false = walk(on_false, arg_map)?;
+                    let inner = A::Where { cond, on_true, on_false };
+                    Ok(Ast {
+                        inner: std::sync::Arc::new(inner),
+                        dtype: ast.dtype(),
+                        shape: ast.shape().clone(),
+                    })
+                }
                 A::Const(cst) => op::cst(*cst),
                 A::Reduce { op, arg, dim } => {
                     let arg = walk(arg, arg_map)?;

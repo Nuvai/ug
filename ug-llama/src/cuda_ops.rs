@@ -4,6 +4,7 @@ use ug_cuda::cudarc::driver::PushKernelArg;
 use ug_cuda::runtime::{CudaFunction, Func, LaunchConfig, Slice, WithErr};
 
 const CAT_CU: &str = include_str!("cat.cu");
+const CAUSAL_MASK_CU: &str = include_str!("causal_mask.cu");
 const ROPE_CU: &str = include_str!("rope.cu");
 const ROPEI_CU: &str = include_str!("ropei.cu");
 const SOFTMAX_CU: &str = include_str!("softmax.cu");
@@ -12,6 +13,7 @@ use std::sync::OnceLock;
 static ROPEI: OnceLock<CudaFunction> = OnceLock::new();
 static ROPE: OnceLock<CudaFunction> = OnceLock::new();
 static CAT: OnceLock<CudaFunction> = OnceLock::new();
+static CAUSAL_MASK: OnceLock<CudaFunction> = OnceLock::new();
 static CUSTOM_SOFTMAX: OnceLock<CudaFunction> = OnceLock::new();
 
 impl crate::Device for ug_cuda::runtime::Device {
@@ -173,7 +175,49 @@ impl crate::Device for ug_cuda::runtime::Device {
         LB::custom(f, vec![src.clone()], src.shape(), src.dtype(), src.device())
     }
 
-    fn causal_mask(_: &LB<Self>) -> Result<LB<Self>> {
-        ug::bail!("causal_mask is not yet implemented for the cuda backend")
+    fn causal_mask(src: &LB<Self>) -> Result<LB<Self>> {
+        let (_b_sz, _num_heads, s1, s2) = src.shape().dims4()?;
+        let num_elements = src.shape().num_elements();
+        let n_rows = num_elements / (s1 * s2);
+        let cfg = LaunchConfig {
+            grid_dim: (n_rows as u32, 1, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let func = CAUSAL_MASK
+            .get_or_init(|| src.device().compile_cu(CAUSAL_MASK_CU, "causal_mask_f32").unwrap());
+        let stream = src.device().cudarc_stream().clone();
+        let func = Func::new(src.device(), func.clone(), cfg);
+        let f = move |vs: Vec<&mut Slice>| -> Result<()> {
+            let [src, dst]: [&mut Slice; 2] = vs.try_into().unwrap();
+            let mut builder = func.builder();
+            let (src, _guard) = src.device_ptr_mut(&stream);
+            let (dst, _guard) = dst.device_ptr_mut(&stream);
+            ug_cuda::bargs!(
+                builder,
+                src,
+                dst,
+                num_elements as u32,
+                s1 as u32,
+                s2 as u32
+            );
+            unsafe { builder.launch(*func.launch_cfg()).w()? };
+            Ok(())
+        };
+        LB::custom(f, vec![src.clone()], src.shape(), src.dtype(), src.device())
+    }
+
+    fn flash_attention(
+        q: &LB<Self>,
+        k: &LB<Self>,
+        v: &LB<Self>,
+        scale: f32,
+    ) -> Result<LB<Self>> {
+        let att = q.matmul_t(k.clone())?;
+        let scale_lb = LB::cst(scale, (), q.device())?.broadcast(att.shape())?;
+        let att = att.binary(ug::lang::BinaryOp::Mul, scale_lb)?;
+        let att = Self::causal_mask(&att)?;
+        let att = crate::model::softmax(&att)?;
+        att.matmul(v.clone())
     }
 }

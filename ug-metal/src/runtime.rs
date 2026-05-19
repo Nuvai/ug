@@ -44,12 +44,18 @@ pub struct Func {
     inner: Function,
     launch_config: ug::lang::LaunchConfig,
     device: Device,
+    cached_pipeline: OnceLock<ComputePipeline>,
 }
 
 impl Func {
     pub fn pipeline(&self) -> Result<ComputePipeline> {
-        let pipeline = self.device.device.new_compute_pipeline_state_with_function(&self.inner)?;
-        Ok(pipeline)
+        let pl = self.cached_pipeline.get_or_init(|| {
+            self.device
+                .device
+                .new_compute_pipeline_state_with_function(&self.inner)
+                .unwrap()
+        });
+        Ok(pl.clone())
     }
 }
 
@@ -57,6 +63,7 @@ impl Func {
 pub struct Device {
     device: crate::metal::Device,
     cq: CommandQueue,
+    pending: std::sync::Arc<Mutex<Vec<CommandBuffer>>>,
 }
 
 impl Device {
@@ -66,6 +73,44 @@ impl Device {
 
     pub fn new_command_buffer(&self) -> Result<CommandBuffer> {
         create_command_buffer(&self.cq)
+    }
+
+    pub fn run_async(&self, f: &Func, args: &mut [&mut Slice]) -> Result<()> {
+        let cb = self.new_command_buffer()?;
+        let encoder = &mut cb.compute_command_encoder();
+        let pl = f.pipeline()?;
+        encoder.set_compute_pipeline_state(&pl);
+        for (index, arg) in args.iter().enumerate() {
+            <&Buffer>::set_param(&encoder, index, &arg.buffer);
+            encoder.use_resource(&arg.buffer, MTLResourceUsage::Read);
+            encoder.use_resource(&arg.buffer, MTLResourceUsage::Write);
+        }
+        let lc = &f.launch_config;
+        let grid_size = MTLSize {
+            width: lc.grid_dim as usize,
+            height: lc.grid_dim_y as usize,
+            depth: lc.grid_dim_z as usize,
+        };
+        let threadgroup_size = MTLSize {
+            width: lc.block_dim as usize,
+            height: lc.block_dim_y as usize,
+            depth: lc.block_dim_z as usize,
+        };
+        encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+        encoder.end_encoding();
+        cb.commit();
+        let mut pending = self.pending.lock().map_err(|e| Error::Msg(format!("{e}")))?;
+        pending.push(cb);
+        Ok(())
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        let mut pending = self.pending.lock().map_err(|e| Error::Msg(format!("{e}")))?;
+        if let Some(last) = pending.last() {
+            last.wait_until_completed();
+        }
+        pending.clear();
+        Ok(())
     }
 
     pub fn run_batched(&self, ops: &[&Func], args: &mut [&mut [&mut Slice]]) -> Result<()> {
@@ -90,10 +135,17 @@ impl Device {
                     encoder.use_resource(&arg.buffer, MTLResourceUsage::Read);
                     encoder.use_resource(&arg.buffer, MTLResourceUsage::Write);
                 }
-                let grid_size =
-                    MTLSize { width: f.launch_config.grid_dim as usize, height: 1, depth: 1 };
-                let threadgroup_size =
-                    MTLSize { width: f.launch_config.block_dim as usize, height: 1, depth: 1 };
+                let lc = &f.launch_config;
+                let grid_size = MTLSize {
+                    width: lc.grid_dim as usize,
+                    height: lc.grid_dim_y as usize,
+                    depth: lc.grid_dim_z as usize,
+                };
+                let threadgroup_size = MTLSize {
+                    width: lc.block_dim as usize,
+                    height: lc.block_dim_y as usize,
+                    depth: lc.block_dim_z as usize,
+                };
                 encoder.dispatch_thread_groups(grid_size, threadgroup_size);
                 encoder.end_encoding();
                 Ok(cb)
@@ -112,7 +164,7 @@ impl Device {
         let device = crate::metal::Device::system_default()
             .ok_or(Error::Msg("No default device found".to_string()))?;
         let cq = device.new_command_queue()?;
-        Ok(Self { device, cq })
+        Ok(Self { device, cq, pending: std::sync::Arc::new(Mutex::new(Vec::new())) })
     }
 
     pub fn compile_metal(
@@ -124,7 +176,7 @@ impl Device {
         let lib =
             self.device.new_library_with_source(metal_code, Some(&MTLCompileOptions::new()))?;
         let inner = lib.get_function(func_name, None)?;
-        Ok(Func { inner, device: self.clone(), launch_config })
+        Ok(Func { inner, device: self.clone(), launch_config, cached_pipeline: OnceLock::new() })
     }
 
     pub fn zeros<T>(&self, len: usize) -> Result<SliceT<T>> {
@@ -158,11 +210,18 @@ impl ug::Device for Device {
             encoder.use_resource(&arg.buffer, MTLResourceUsage::Read);
             encoder.use_resource(&arg.buffer, MTLResourceUsage::Write);
         }
-        let grid_size = MTLSize { width: f.launch_config.grid_dim as usize, height: 1, depth: 1 };
-        let threadgroup_size =
-            MTLSize { width: f.launch_config.block_dim as usize, height: 1, depth: 1 };
+        let lc = &f.launch_config;
+        let grid_size = MTLSize {
+            width: lc.grid_dim as usize,
+            height: lc.grid_dim_y as usize,
+            depth: lc.grid_dim_z as usize,
+        };
+        let threadgroup_size = MTLSize {
+            width: lc.block_dim as usize,
+            height: lc.block_dim_y as usize,
+            depth: lc.block_dim_z as usize,
+        };
         encoder.dispatch_thread_groups(grid_size, threadgroup_size);
-        // Somehow, using dispatch_threads with non-even group size doesn't work properly here.
         encoder.end_encoding();
         cb.commit();
         cb.wait_until_completed();
@@ -218,6 +277,7 @@ impl ug::Device for Device {
     }
 
     fn synchronize(&self) -> Result<()> {
+        self.flush()?;
         let cb = self.new_command_buffer()?;
         cb.commit();
         cb.wait_until_completed();
@@ -341,6 +401,58 @@ impl ug::Slice for Slice {
 impl Slice {
     pub fn buffer(&self) -> &Buffer {
         &self.buffer
+    }
+}
+
+pub struct CapturedGraph {
+    ops: Vec<(Func, Vec<usize>)>,
+}
+
+impl CapturedGraph {
+    pub fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    pub fn record(&mut self, func: Func, arg_indices: Vec<usize>) {
+        self.ops.push((func, arg_indices));
+    }
+
+    pub fn replay(&self, device: &Device, buffers: &mut [&mut Slice]) -> Result<()> {
+        let cb = device.new_command_buffer()?;
+        for (func, arg_indices) in &self.ops {
+            let encoder = &mut cb.compute_command_encoder();
+            let pl = func.pipeline()?;
+            encoder.set_compute_pipeline_state(&pl);
+            for (param_idx, &buf_idx) in arg_indices.iter().enumerate() {
+                <&Buffer>::set_param(&encoder, param_idx, &buffers[buf_idx].buffer);
+                encoder.use_resource(&buffers[buf_idx].buffer, MTLResourceUsage::Read);
+                encoder.use_resource(&buffers[buf_idx].buffer, MTLResourceUsage::Write);
+            }
+            let lc = &func.launch_config;
+            let grid_size = MTLSize {
+                width: lc.grid_dim as usize,
+                height: lc.grid_dim_y as usize,
+                depth: lc.grid_dim_z as usize,
+            };
+            let threadgroup_size = MTLSize {
+                width: lc.block_dim as usize,
+                height: lc.block_dim_y as usize,
+                depth: lc.block_dim_z as usize,
+            };
+            encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+            encoder.end_encoding();
+        }
+        cb.commit();
+        cb.wait_until_completed();
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
     }
 }
 

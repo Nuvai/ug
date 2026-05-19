@@ -29,6 +29,12 @@ pub enum BinaryOp {
     Mod,
     Min,
     Max,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,11 +42,63 @@ pub struct LaunchConfig {
     pub grid_dim: u32,
     pub block_dim: u32,
     pub shared_mem: u32,
+    pub grid_dim_y: u32,
+    pub grid_dim_z: u32,
+    pub block_dim_y: u32,
+    pub block_dim_z: u32,
 }
 
 impl LaunchConfig {
     pub fn for_num_elems(n: u32) -> Self {
-        LaunchConfig { grid_dim: n.div_ceil(32), block_dim: 32, shared_mem: 0 }
+        LaunchConfig {
+            grid_dim: n.div_ceil(32),
+            block_dim: 32,
+            shared_mem: 0,
+            grid_dim_y: 1,
+            grid_dim_z: 1,
+            block_dim_y: 1,
+            block_dim_z: 1,
+        }
+    }
+
+    pub fn new_1d(grid: u32, block: u32) -> Self {
+        Self {
+            grid_dim: grid,
+            block_dim: block,
+            shared_mem: 0,
+            grid_dim_y: 1,
+            grid_dim_z: 1,
+            block_dim_y: 1,
+            block_dim_z: 1,
+        }
+    }
+
+    pub fn new_2d(grid: (u32, u32), block: (u32, u32)) -> Self {
+        Self {
+            grid_dim: grid.0,
+            grid_dim_y: grid.1,
+            grid_dim_z: 1,
+            block_dim: block.0,
+            block_dim_y: block.1,
+            block_dim_z: 1,
+            shared_mem: 0,
+        }
+    }
+
+    pub fn new_3d(grid: (u32, u32, u32), block: (u32, u32, u32)) -> Self {
+        Self {
+            grid_dim: grid.0,
+            grid_dim_y: grid.1,
+            grid_dim_z: grid.2,
+            block_dim: block.0,
+            block_dim_y: block.1,
+            block_dim_z: block.2,
+            shared_mem: 0,
+        }
+    }
+
+    pub fn is_multidim(&self) -> bool {
+        self.grid_dim_y > 1 || self.grid_dim_z > 1 || self.block_dim_y > 1 || self.block_dim_z > 1
     }
 }
 
@@ -54,6 +112,12 @@ impl BinaryOp {
             Self::Min => "min",
             Self::Max => "max",
             Self::Mod => "mod",
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Gt => "gt",
+            Self::Ge => "ge",
         }
     }
 }
@@ -437,6 +501,7 @@ pub mod op {
         Reduce { op: ReduceOp, arg: Ast, dim: usize },
         Unary { op: UnaryOp, arg: Ast },
         Binary { op: BinaryOp, lhs: Ast, rhs: Ast },
+        Where { cond: Ast, on_true: Ast, on_false: Ast },
         Const(Const),
 
         // Layout operations
@@ -557,6 +622,11 @@ pub mod op {
                         visit(lhs, ids);
                         visit(rhs, ids)
                     }
+                    AstInner::Where { cond, on_true, on_false } => {
+                        visit(cond, ids);
+                        visit(on_true, ids);
+                        visit(on_false, ids)
+                    }
                     AstInner::Load { src, layout: _ } => {
                         ids.insert(*src);
                     }
@@ -637,6 +707,10 @@ pub mod ssa {
     pub enum Special {
         ThreadIdx,
         BlockIdx,
+        ThreadIdxY,
+        ThreadIdxZ,
+        BlockIdxY,
+        BlockIdxZ,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -703,6 +777,7 @@ pub mod ssa {
         EndIf,
         Store { dst: VarId, offset: A, value: A, dtype: DType },
         Barrier,
+        Where { cond: A, on_true: A, on_false: A, dtype: DType },
         // This is not part of the tinygrad SSA but is convenient to handle warp reduce without
         // shared memory.
         ReduceLocal { op: ReduceOp, arg: A, dtype: DType },
@@ -722,6 +797,10 @@ pub mod ssa {
 
         pub fn instrs(&self) -> &Vec<Instr> {
             &self.instrs
+        }
+
+        pub fn instrs_mut(&mut self) -> &mut Vec<Instr> {
+            &mut self.instrs
         }
 
         pub fn args(&self) -> &[(Arg, usize)] {
@@ -748,7 +827,7 @@ pub mod ssa {
                     args.push((arg, line_no));
                 }
             }
-            let launch_config = LaunchConfig { grid_dim: 1, block_dim: 1, shared_mem: 0 };
+            let launch_config = LaunchConfig::new_1d(1, 1);
             Ok(Self { instrs, args, launch_config })
         }
 
@@ -795,7 +874,9 @@ pub mod ssa {
                         None => crate::bail!("unexpected EndRange"),
                         Some(m) => mult = m,
                     },
-                    Instr::Unary { .. } | Instr::Binary { .. } => flops += mult,
+                    Instr::Unary { .. } | Instr::Binary { .. } | Instr::Where { .. } => {
+                        flops += mult
+                    }
                     Instr::DefineGlobal { .. }
                     | Instr::DefineLocal { .. }
                     | Instr::DefineAcc(_)

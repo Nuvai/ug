@@ -67,9 +67,14 @@ impl std::fmt::Display for D {
 
 pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) -> Result<()> {
     let instrs = kernel.instrs();
+    let contains_reduce_local = instrs.iter().any(|v| matches!(v, ssa::Instr::ReduceLocal { .. }));
 
     writeln!(w, "#include <metal_stdlib>")?;
     writeln!(w, "using namespace metal;")?;
+    if contains_reduce_local {
+        w.write_all(include_bytes!("reduce.metal"))?;
+        writeln!(w)?;
+    }
     writeln!(w, "[[kernel]] void {func_name}(")?;
     for &(arg, var_id) in kernel.args().iter() {
         let ty_ = match arg.type_() {
@@ -86,6 +91,9 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
     writeln!(w, "  uint3 tpitg[[thread_position_in_threadgroup]],")?;
     writeln!(w, "  uint3   ntg[[threads_per_threadgroup]]")?;
     writeln!(w, ") {{")?;
+    if contains_reduce_local {
+        writeln!(w, "  threadgroup float __reduce_smem[32];")?;
+    }
 
     let mut depth = 0;
     for (var_id, instr) in instrs.iter().enumerate() {
@@ -140,6 +148,12 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                     ssa::BinaryOp::Min => format!("min({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Max => format!("max({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Mod => format!("{} % {}", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Eq => format!("static_cast<float>({} == {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ne => format!("static_cast<float>({} != {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Lt => format!("static_cast<float>({} < {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Le => format!("static_cast<float>({} <= {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Gt => format!("static_cast<float>({} > {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ge => format!("static_cast<float>({} >= {})", A(*lhs), A(*rhs)),
                 };
                 writeln!(w, "{indent}{} {var_id} = {op};", D(*dtype),)?;
             }
@@ -162,7 +176,21 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                 writeln!(w, "{indent}{} {var_id} = {op}({});", D(*dtype), A(*arg))?;
             }
             I::Special(ssa::Special::ThreadIdx) => writeln!(w, "{indent}int {var_id} = tpitg.x;")?,
+            I::Special(ssa::Special::ThreadIdxY) => writeln!(w, "{indent}int {var_id} = tpitg.y;")?,
+            I::Special(ssa::Special::ThreadIdxZ) => writeln!(w, "{indent}int {var_id} = tpitg.z;")?,
             I::Special(ssa::Special::BlockIdx) => writeln!(w, "{indent}int {var_id} = tgpig.x;")?,
+            I::Special(ssa::Special::BlockIdxY) => writeln!(w, "{indent}int {var_id} = tgpig.y;")?,
+            I::Special(ssa::Special::BlockIdxZ) => writeln!(w, "{indent}int {var_id} = tgpig.z;")?,
+            I::Where { cond, on_true, on_false, dtype } => {
+                writeln!(
+                    w,
+                    "{indent}{} {var_id} = {} ? {} : {};",
+                    D(*dtype),
+                    A(*cond),
+                    A(*on_true),
+                    A(*on_false)
+                )?;
+            }
             I::Barrier => writeln!(w, "{indent}threadgroup_barrier(mem_flags::mem_threadgroup);")?,
             I::ReduceLocal { op, arg, dtype } => {
                 let op = match op {
@@ -170,7 +198,12 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                     ssa::ReduceOp::Min => "block_reduce_min",
                     ssa::ReduceOp::Max => "block_reduce_max",
                 };
-                writeln!(w, "{indent}{} {var_id} = {op}({});", D(*dtype), A(*arg))?;
+                writeln!(
+                    w,
+                    "{indent}{} {var_id} = {op}({}, __reduce_smem, tpitg.x, ntg.x);",
+                    D(*dtype),
+                    A(*arg)
+                )?;
             }
         }
     }

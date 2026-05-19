@@ -1,4 +1,4 @@
-use crate::{Device, LB};
+use crate::{model, Device, LB};
 use rayon::prelude::*;
 use ug::{CpuStorage, Result};
 
@@ -164,5 +164,19 @@ impl Device for ug::CpuDevice {
             Ok(())
         };
         LB::custom(f, vec![lhs.clone(), rhs.clone()], dst_dims, lhs.dtype(), lhs.device())
+    }
+
+    fn flash_attention(
+        q: &LB<Self>,
+        k: &LB<Self>,
+        v: &LB<Self>,
+        scale: f32,
+    ) -> Result<LB<Self>> {
+        let att = q.matmul_t(k.clone())?;
+        let scale_lb = LB::cst(scale, (), q.device())?.broadcast(att.shape())?;
+        let att = att.binary(ug::lang::BinaryOp::Mul, scale_lb)?;
+        let att = Self::causal_mask(&att)?;
+        let att = model::softmax(&att)?;
+        att.matmul(v.clone())
     }
 }

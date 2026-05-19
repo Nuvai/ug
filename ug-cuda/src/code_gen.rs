@@ -140,6 +140,12 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                     ssa::BinaryOp::Min => format!("min({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Max => format!("max({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Mod => format!("{} % {}", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Eq => format!("(float)({} == {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ne => format!("(float)({} != {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Lt => format!("(float)({} < {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Le => format!("(float)({} <= {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Gt => format!("(float)({} > {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ge => format!("(float)({} >= {})", A(*lhs), A(*rhs)),
                 };
                 writeln!(w, "{indent}{} {var_id} = {op};", D(*dtype),)?;
             }
@@ -164,8 +170,30 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
             I::Special(ssa::Special::ThreadIdx) => {
                 writeln!(w, "{indent}int {var_id} = threadIdx.x;")?
             }
+            I::Special(ssa::Special::ThreadIdxY) => {
+                writeln!(w, "{indent}int {var_id} = threadIdx.y;")?
+            }
+            I::Special(ssa::Special::ThreadIdxZ) => {
+                writeln!(w, "{indent}int {var_id} = threadIdx.z;")?
+            }
             I::Special(ssa::Special::BlockIdx) => {
                 writeln!(w, "{indent}int {var_id} = blockIdx.x;")?
+            }
+            I::Special(ssa::Special::BlockIdxY) => {
+                writeln!(w, "{indent}int {var_id} = blockIdx.y;")?
+            }
+            I::Special(ssa::Special::BlockIdxZ) => {
+                writeln!(w, "{indent}int {var_id} = blockIdx.z;")?
+            }
+            I::Where { cond, on_true, on_false, dtype } => {
+                writeln!(
+                    w,
+                    "{indent}{} {var_id} = {} ? {} : {};",
+                    D(*dtype),
+                    A(*cond),
+                    A(*on_true),
+                    A(*on_false)
+                )?;
             }
             I::Barrier => writeln!(w, "{indent}__syncthreads();")?,
             I::ReduceLocal { op, arg, dtype } => {

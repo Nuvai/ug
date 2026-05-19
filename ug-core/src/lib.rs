@@ -15,7 +15,10 @@ pub mod lower;
 pub mod lower_op;
 pub mod safetensors;
 pub mod samples;
+pub mod quantize;
 pub mod schedule;
+pub mod ssa_opt;
+pub mod tensor_ops;
 pub mod utils;
 
 pub use cpu_runtime::{CpuDevice, CpuStorage, CpuStorageRef, CpuStorageRefMut};

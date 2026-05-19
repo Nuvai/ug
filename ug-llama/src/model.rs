@@ -36,7 +36,7 @@ fn index_select<D: Device>(src: &LB<D>, ids: &LB<D>) -> Result<LB<D>> {
         I::DefineGlobal { index, dtype }
     }
 
-    let dtype = DType::F32;
+    let dtype = src.dtype();
     let (b_sz, seq_len) = ids.dims2()?;
     let (_, h) = src.shape().dims2()?;
 
@@ -114,8 +114,8 @@ struct RmsNorm<D: Device> {
 }
 
 impl<D: Device> RmsNorm<D> {
-    fn new(dim: usize, eps: f64, name: &str, st: &ST, device: &D) -> Result<Self> {
-        let alpha = st.load_with_cast(name, ug::DType::F32, device)?;
+    fn new(dim: usize, eps: f64, name: &str, dtype: DType, st: &ST, device: &D) -> Result<Self> {
+        let alpha = st.load_with_cast(name, dtype, device)?;
         if alpha.dims() != [dim] {
             ug::bail!("unexpected shape for {name}: {:?}, expected {dim}", alpha.shape())
         }
@@ -136,8 +136,8 @@ struct Linear<D: Device> {
 }
 
 impl<D: Device> Linear<D> {
-    fn new(in_c: usize, out_c: usize, name: &str, st: &ST, device: &D) -> Result<Self> {
-        let w = st.load_with_cast(name, ug::DType::F32, device)?;
+    fn new(in_c: usize, out_c: usize, name: &str, dtype: DType, st: &ST, device: &D) -> Result<Self> {
+        let w = st.load_with_cast(name, dtype, device)?;
         if w.dims() != [out_c, in_c] {
             ug::bail!("unexpected shape for {name}: {:?}, exp ({out_c}, {in_c})", w.shape())
         }
@@ -183,17 +183,42 @@ struct Attention<D: Device> {
 pub struct Cache<D: Device> {
     prev_k: LB<D>,
     prev_v: LB<D>,
+    seq_len: usize,
+    max_seq_len: usize,
 }
 
 impl<D: Device> Cache<D> {
     pub fn new(cfg: &Config, device: &D) -> Result<Vec<Self>> {
+        let max_seq_len = cfg.max_position_embeddings;
         let mut cache = Vec::with_capacity(cfg.num_hidden_layers);
         for _ in 0..cfg.num_hidden_layers {
             let prev_k = LB::cst(0f32, (1, cfg.num_key_value_heads, 0, cfg.head_dim()), device)?;
             let prev_v = LB::cst(0f32, (1, cfg.num_key_value_heads, 0, cfg.head_dim()), device)?;
-            cache.push(Cache { prev_k, prev_v });
+            cache.push(Cache { prev_k, prev_v, seq_len: 0, max_seq_len });
         }
         Ok(cache)
+    }
+
+    pub fn current_seq_len(&self) -> usize {
+        self.seq_len
+    }
+
+    pub fn append_kv(&mut self, k: &LB<D>, v: &LB<D>) -> Result<(LB<D>, LB<D>)> {
+        let (_, _, new_seq, _) = k.dims4()?;
+        if self.seq_len + new_seq > self.max_seq_len {
+            ug::bail!(
+                "KV cache overflow: {} + {} > {}",
+                self.seq_len,
+                new_seq,
+                self.max_seq_len
+            )
+        }
+        let k = D::cat(&self.prev_k, k, 2)?;
+        let v = D::cat(&self.prev_v, v, 2)?;
+        self.seq_len += new_seq;
+        self.prev_k = k.clone();
+        self.prev_v = v.clone();
+        Ok((k, v))
     }
 }
 
@@ -223,11 +248,7 @@ impl<D: Device> Attention<D> {
         } else {
             D::rope(&k, &r.cos, &r.sin, pos)?
         };
-        let k = D::cat(&cache.prev_k, &k, 2)?;
-        let v = D::cat(&cache.prev_v, &v, 2)?;
-
-        cache.prev_k = k.clone();
-        cache.prev_v = v.clone();
+        let (k, v) = cache.append_kv(&k, &v)?;
         let k = repeat(&k, 1, self.num_heads / self.num_kv_heads)?;
         let v = repeat(&v, 1, self.num_heads / self.num_kv_heads)?;
 
@@ -307,11 +328,12 @@ impl<D: Device> Model<D> {
     pub fn new(
         cfg: &Config,
         custom_softmax: bool,
+        dtype: DType,
         st: &ug::safetensors::MmapedSafetensors,
         dev: &D,
     ) -> Result<Self> {
-        let embedding = st.load_with_cast("model.embed_tokens.weight", ug::DType::F32, dev)?;
-        let ln_f = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, "model.norm.weight", st, dev)?;
+        let embedding = st.load_with_cast("model.embed_tokens.weight", dtype, dev)?;
+        let ln_f = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, "model.norm.weight", dtype, st, dev)?;
         let lm_head = if cfg.tie_word_embeddings {
             Linear { w: embedding.clone(), in_c: cfg.hidden_size, out_c: cfg.vocab_size }
         } else {
@@ -325,25 +347,26 @@ impl<D: Device> Model<D> {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for layer_idx in 0..cfg.num_hidden_layers {
             let name = format!("model.layers.{layer_idx}");
-            let rms1 = RmsNorm::new(h_sz, eps, &format!("{name}.input_layernorm.weight"), st, dev)?;
+            let rms1 = RmsNorm::new(h_sz, eps, &format!("{name}.input_layernorm.weight"), dtype, st, dev)?;
             let rms2 = RmsNorm::new(
                 h_sz,
                 eps,
                 &format!("{name}.post_attention_layernorm.weight"),
+                dtype,
                 st,
                 dev,
             )?;
-            let c_fc1 = Linear::new(h_sz, i_sz, &format!("{name}.mlp.gate_proj.weight"), st, dev)?;
-            let c_fc2 = Linear::new(h_sz, i_sz, &format!("{name}.mlp.up_proj.weight"), st, dev)?;
-            let c_proj = Linear::new(i_sz, h_sz, &format!("{name}.mlp.down_proj.weight"), st, dev)?;
+            let c_fc1 = Linear::new(h_sz, i_sz, &format!("{name}.mlp.gate_proj.weight"), dtype, st, dev)?;
+            let c_fc2 = Linear::new(h_sz, i_sz, &format!("{name}.mlp.up_proj.weight"), dtype, st, dev)?;
+            let c_proj = Linear::new(i_sz, h_sz, &format!("{name}.mlp.down_proj.weight"), dtype, st, dev)?;
             let q_proj =
-                Linear::new(h_sz, h_sz, &format!("{name}.self_attn.q_proj.weight"), st, dev)?;
+                Linear::new(h_sz, h_sz, &format!("{name}.self_attn.q_proj.weight"), dtype, st, dev)?;
             let k_proj =
-                Linear::new(h_sz, kv_sz, &format!("{name}.self_attn.k_proj.weight"), st, dev)?;
+                Linear::new(h_sz, kv_sz, &format!("{name}.self_attn.k_proj.weight"), dtype, st, dev)?;
             let v_proj =
-                Linear::new(h_sz, kv_sz, &format!("{name}.self_attn.v_proj.weight"), st, dev)?;
+                Linear::new(h_sz, kv_sz, &format!("{name}.self_attn.v_proj.weight"), dtype, st, dev)?;
             let o_proj =
-                Linear::new(h_sz, h_sz, &format!("{name}.self_attn.o_proj.weight"), st, dev)?;
+                Linear::new(h_sz, h_sz, &format!("{name}.self_attn.o_proj.weight"), dtype, st, dev)?;
             let attn = Attention {
                 q_proj,
                 k_proj,

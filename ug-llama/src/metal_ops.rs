@@ -6,6 +6,7 @@ use ug_metal::runtime::{Func, Slice};
 
 const CAT_M: &str = include_str!("cat.metal");
 const CAUSAL_MASK_M: &str = include_str!("causal_mask.metal");
+const FLASH_ATTN_M: &str = include_str!("flash_attn.metal");
 const ROPE_M: &str = include_str!("rope.metal");
 const ROPEI_M: &str = include_str!("ropei.metal");
 const SOFTMAX_M: &str = include_str!("softmax.metal");
@@ -117,7 +118,7 @@ impl crate::Device for ug_metal::runtime::Device {
         let d2_l = l_dims[axis..].iter().product::<usize>();
         let d2_r = r_dims[axis..].iter().product::<usize>();
         let d2_lr = d2_l + d2_r;
-        let cfg = ug::lang::LaunchConfig { grid_dim: d1 as u32, block_dim: 32, shared_mem: 0 };
+        let cfg = ug::lang::LaunchConfig::new_1d(d1 as u32, 32);
         // TODO: Use get_or_try_init when available.
         let func = CAT.get_or_init(|| lhs.device().compile_metal(CAT_M, "cat_f32", cfg).unwrap());
         let device = device.clone();
@@ -152,7 +153,7 @@ impl crate::Device for ug_metal::runtime::Device {
         let dim_m1 = src.dims()[rank - 1];
         let num_elements = src.shape().num_elements();
         let n_rows = num_elements / dim_m1;
-        let cfg = LaunchConfig { grid_dim: n_rows as u32, block_dim: 32, shared_mem: 0 };
+        let cfg = LaunchConfig::new_1d(n_rows as u32, 32);
 
         // TODO: Use get_or_try_init when available.
         let func = CUSTOM_SOFTMAX
@@ -178,13 +179,68 @@ impl crate::Device for ug_metal::runtime::Device {
         LB::custom(f, vec![src.clone()], src.shape(), src.dtype(), src.device())
     }
 
+    fn flash_attention(
+        q: &LB<Self>,
+        k: &LB<Self>,
+        v: &LB<Self>,
+        scale: f32,
+    ) -> Result<LB<Self>> {
+        static FLASH_ATTN: OnceLock<Func> = OnceLock::new();
+        let device = q.device();
+        let (b_sz, num_heads, seq_len, head_dim) = q.dims4()?;
+        let (_, _, kv_len, _) = k.dims4()?;
+        let batch_heads = (b_sz * num_heads) as u32;
+        let cfg = LaunchConfig::new_2d((batch_heads, seq_len as u32), (32, 1));
+        let func = FLASH_ATTN
+            .get_or_init(|| device.compile_metal(FLASH_ATTN_M, "flash_attention_f32", cfg).unwrap());
+        let device = device.clone();
+        let f = move |vs: Vec<&mut Slice>| -> Result<()> {
+            let [q_s, k_s, v_s, o_s]: [&mut Slice; 4] = vs.try_into().unwrap();
+            let cb = device.new_command_buffer()?;
+            let encoder = &mut cb.compute_command_encoder();
+            let pl = func.pipeline()?;
+            encoder.set_compute_pipeline_state(&pl);
+            ug_metal::set_params!(
+                encoder,
+                (
+                    &*q_s,
+                    &*k_s,
+                    &*v_s,
+                    &*o_s,
+                    seq_len as u32,
+                    head_dim as u32,
+                    kv_len as u32,
+                    scale
+                )
+            );
+            let grid_size = MTLSize { width: batch_heads as usize, height: seq_len, depth: 1 };
+            let threadgroup_size = MTLSize { width: 32, height: 1, depth: 1 };
+            encoder.use_resource(q_s.buffer(), MTLResourceUsage::Read);
+            encoder.use_resource(k_s.buffer(), MTLResourceUsage::Read);
+            encoder.use_resource(v_s.buffer(), MTLResourceUsage::Read);
+            encoder.use_resource(o_s.buffer(), MTLResourceUsage::Write);
+            encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+            encoder.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+            Ok(())
+        };
+        LB::custom(
+            f,
+            vec![q.clone(), k.clone(), v.clone()],
+            (b_sz, num_heads, seq_len, head_dim),
+            q.dtype(),
+            q.device(),
+        )
+    }
+
     fn causal_mask(src: &LB<Self>) -> Result<LB<Self>> {
         static CAUSAL_MASK: OnceLock<Func> = OnceLock::new();
         let device = src.device();
         let (_b_sz, _num_heads, s1, s2) = src.dims4()?;
         let num_elements = src.shape().num_elements();
         let n_rows = num_elements / (s1 * s2);
-        let cfg = LaunchConfig { grid_dim: n_rows as u32, block_dim: 32, shared_mem: 0 };
+        let cfg = LaunchConfig::new_1d(n_rows as u32, 32);
         let func = CAUSAL_MASK
             .get_or_init(|| device.compile_metal(CAUSAL_MASK_M, "causal_mask_f32", cfg).unwrap());
         let device = device.clone();

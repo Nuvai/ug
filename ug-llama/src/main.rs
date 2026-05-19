@@ -25,6 +25,7 @@ pub trait Device: ug::Device {
     fn cat(lhs: &LB<Self>, rhs: &LB<Self>, axis: usize) -> Result<LB<Self>>;
     fn custom_softmax(src: &LB<Self>) -> Result<LB<Self>>;
     fn causal_mask(src: &LB<Self>) -> Result<LB<Self>>;
+    fn flash_attention(q: &LB<Self>, k: &LB<Self>, v: &LB<Self>, scale: f32) -> Result<LB<Self>>;
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -41,6 +42,23 @@ enum Which {
     L32_3B,
 }
 
+#[derive(Clone, Debug, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DTypeArg {
+    F32,
+    F16,
+    Bf16,
+}
+
+impl DTypeArg {
+    fn to_dtype(self) -> ug::DType {
+        match self {
+            DTypeArg::F32 => ug::DType::F32,
+            DTypeArg::F16 => ug::DType::F16,
+            DTypeArg::Bf16 => ug::DType::BF16,
+        }
+    }
+}
+
 #[derive(clap::Parser, Debug)]
 struct Args {
     #[arg(long)]
@@ -54,6 +72,9 @@ struct Args {
 
     #[arg(long)]
     custom_softmax: bool,
+
+    #[arg(long, default_value = "f32")]
+    dtype: DTypeArg,
 
     #[arg(long, default_value = "smol2-135m")]
     which: Which,
@@ -119,7 +140,7 @@ fn run<D: Device>(dev: &D, args: &Args) -> Result<()> {
     let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_file)
         .map_err(|v| Error::debug(format!("{v:?}")))?;
     let st = unsafe { ug::safetensors::MmapedSafetensors::new(model_file)? };
-    let model = Model::<D>::new(&cfg, args.custom_softmax, &st, dev)?;
+    let model = Model::<D>::new(&cfg, args.custom_softmax, args.dtype.to_dtype(), &st, dev)?;
     let mut cache = Cache::<D>::new(&cfg, dev)?;
     let mut rng = rand::rngs::StdRng::seed_from_u64(42);
     let mut last_token = BOS_TOKEN;

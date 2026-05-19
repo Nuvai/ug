@@ -51,6 +51,7 @@ impl Id {
 pub enum Op<D: Device> {
     Unary(crate::lang::UnaryOp, LazyBuffer<D>),
     Binary(crate::lang::BinaryOp, LazyBuffer<D>, LazyBuffer<D>),
+    Where(LazyBuffer<D>, LazyBuffer<D>, LazyBuffer<D>),
     MatMul(LazyBuffer<D>, LazyBuffer<D>, (usize, usize, usize, usize), bool),
     Reduce(crate::lang::ReduceOp, LazyBuffer<D>, usize),
     Const(crate::lang::Const),
@@ -135,6 +136,7 @@ impl<D: Device> LazyBuffer<D> {
             | Op::Const(_)
             | Op::Value
             | Op::Binary(_, _, _)
+            | Op::Where(_, _, _)
             | Op::MatMul(_, _, _, _)
             | Op::Reduce(_, _, _)
             | Op::Layout(_, _)
@@ -251,6 +253,28 @@ impl<D: Device> LazyBuffer<D> {
             dtype,
             shape: self.shape.clone(),
             device: self.device.clone(),
+        };
+        let lb = LazyBuffer(Arc::new(inner));
+        Ok(lb)
+    }
+
+    pub fn where_(&self, on_true: Self, on_false: Self) -> Result<Self> {
+        if on_true.shape != on_false.shape {
+            bail!("shape mismatch in where, {:?} vs {:?}", on_true.shape, on_false.shape)
+        }
+        if self.shape != on_true.shape {
+            bail!("shape mismatch in where cond, {:?} vs {:?}", self.shape, on_true.shape)
+        }
+        if on_true.dtype != on_false.dtype {
+            bail!("dtype mismatch in where, {:?} vs {:?}", on_true.dtype, on_false.dtype)
+        }
+        let inner = LazyBufferInner {
+            id: Id::new(),
+            data: Arc::new(RefCell::new(None)),
+            op: Op::Where(self.clone(), on_true.clone(), on_false),
+            dtype: on_true.dtype,
+            device: self.device.clone(),
+            shape: on_true.shape.clone(),
         };
         let lb = LazyBuffer(Arc::new(inner));
         Ok(lb)

@@ -141,6 +141,12 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                     ssa::BinaryOp::Min => format!("fmin({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Max => format!("fmax({}, {})", A(*lhs), A(*rhs)),
                     ssa::BinaryOp::Mod => format!("{} % {}", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Eq => format!("(float)({} == {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ne => format!("(float)({} != {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Lt => format!("(float)({} < {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Le => format!("(float)({} <= {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Gt => format!("(float)({} > {})", A(*lhs), A(*rhs)),
+                    ssa::BinaryOp::Ge => format!("(float)({} >= {})", A(*lhs), A(*rhs)),
                 };
                 writeln!(w, "{indent}{} {var_id} = {op};", D(*dtype),)?;
             }
@@ -157,13 +163,25 @@ pub fn gen<W: std::io::Write>(w: &mut W, func_name: &str, kernel: &ssa::Kernel) 
                 };
                 writeln!(w, "{indent}{} {var_id} = {op}({});", D(*dtype), A(*arg))?;
             }
-            I::Special(ssa::Special::ThreadIdx) => {
-                // TODO: proper handling of ThreadIdx, maybe via simd?
+            I::Special(ssa::Special::ThreadIdx)
+            | I::Special(ssa::Special::ThreadIdxY)
+            | I::Special(ssa::Special::ThreadIdxZ) => {
                 bail!("thread-id is currently not supported in the cpu backend")
             }
-            I::Special(ssa::Special::BlockIdx) => {
-                // TODO: proper handling of BlockIdx, maybe via omp?
+            I::Special(ssa::Special::BlockIdx)
+            | I::Special(ssa::Special::BlockIdxY)
+            | I::Special(ssa::Special::BlockIdxZ) => {
                 bail!("block-id is currently not supported in the cpu backend")
+            }
+            I::Where { cond, on_true, on_false, dtype } => {
+                writeln!(
+                    w,
+                    "{indent}{} {var_id} = {} ? {} : {};",
+                    D(*dtype),
+                    A(*cond),
+                    A(*on_true),
+                    A(*on_false)
+                )?;
             }
             I::Barrier => {
                 // Nothing to do here as we're running with a single thread.

@@ -412,6 +412,17 @@ impl<D: Device> Context<D> {
                     self.items.push(ScheduleItem::Custom { f: f.clone(), args });
                     crate::lang::op::load(arg_id, Layout::from_shape(shape), dtype)?
                 }
+                Op::Where(cond, on_true, on_false) => {
+                    let cond = self.walk(cond)?;
+                    let on_true = self.walk(on_true)?;
+                    let on_false = self.walk(on_false)?;
+                    let inner = crate::lang::op::AstInner::Where { cond, on_true, on_false };
+                    Ast {
+                        inner: std::sync::Arc::new(inner),
+                        dtype,
+                        shape: shape.clone(),
+                    }
+                }
                 Op::Custom { f, args: b_args } => {
                     let mut args = Vec::with_capacity(b_args.len() + 1);
                     for arg in b_args.iter() {
@@ -503,6 +514,11 @@ fn id_cnts<D: Device>(
         | Op::Binary(_, arg1, arg2) => {
             id_cnts(arg1, cnts)?;
             id_cnts(arg2, cnts)?;
+        }
+        Op::Where(cond, on_true, on_false) => {
+            id_cnts(cond, cnts)?;
+            id_cnts(on_true, cnts)?;
+            id_cnts(on_false, cnts)?;
         }
         Op::CustomIp { f: _, args, src } => {
             for arg in args.iter() {

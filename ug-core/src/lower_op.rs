@@ -280,6 +280,17 @@ fn extract_const(ast: &Ast, dim: usize) -> Result<(Vec<(Id, Ast)>, Ast)> {
                 let rhs = walk(rhs, tgt_dim, accs)?;
                 lang::op::binary(*op, lhs, rhs)?
             }
+            A::Where { cond, on_true, on_false } => {
+                let cond = walk(cond, tgt_dim, accs)?;
+                let on_true = walk(on_true, tgt_dim, accs)?;
+                let on_false = walk(on_false, tgt_dim, accs)?;
+                let inner = A::Where { cond, on_true, on_false };
+                Ast {
+                    inner: std::sync::Arc::new(inner),
+                    dtype: ast.dtype(),
+                    shape: ast.shape().clone(),
+                }
+            }
             A::Layout { op, arg } => {
                 let arg = walk(arg, tgt_dim, accs)?;
                 let inner = A::Layout { arg, op: op.clone() };
@@ -397,6 +408,26 @@ impl Ast {
                 let (rhs_i, rhs_b) = rhs.lower(idxs, opts, per_arg)?;
                 let op = SsaI::Binary { op: *op, dtype, lhs: lhs_i.to_a(), rhs: rhs_i.to_a() };
                 let instrs = [lhs_b.0.as_slice(), rhs_b.0.as_slice(), &[(dst_i, op)]].concat();
+                (dst_i, Block(instrs))
+            }
+            A::Where { cond, on_true, on_false } => {
+                let dst_i = Id::new();
+                let (cond_i, cond_b) = cond.lower(idxs, opts, per_arg)?;
+                let (true_i, true_b) = on_true.lower(idxs, opts, per_arg)?;
+                let (false_i, false_b) = on_false.lower(idxs, opts, per_arg)?;
+                let op = SsaI::Where {
+                    cond: cond_i.to_a(),
+                    on_true: true_i.to_a(),
+                    on_false: false_i.to_a(),
+                    dtype,
+                };
+                let instrs = [
+                    cond_b.0.as_slice(),
+                    true_b.0.as_slice(),
+                    false_b.0.as_slice(),
+                    &[(dst_i, op)],
+                ]
+                .concat();
                 (dst_i, Block(instrs))
             }
             A::Id { src } => (*src, Block::empty()),
@@ -521,6 +552,17 @@ impl lang::op::Kernel {
                         }
                     }
                 }
+                A::Where { cond, on_true, on_false } => {
+                    let cond = walk(cond)?;
+                    let on_true = walk(on_true)?;
+                    let on_false = walk(on_false)?;
+                    let inner = A::Where { cond, on_true, on_false };
+                    Ok(Ast {
+                        inner: std::sync::Arc::new(inner),
+                        dtype: v.dtype(),
+                        shape: v.shape().clone(),
+                    })
+                }
                 A::Const(_) | A::Id { .. } => Ok(v.clone()),
             }
         }
@@ -552,7 +594,7 @@ impl lang::op::Kernel {
             None => 1,
         };
         let block_dim = opts.thread_block().map_or(1, |v| v.block_dim as u32);
-        let cfg = lang::LaunchConfig { grid_dim, block_dim, shared_mem: 0 };
+        let cfg = lang::LaunchConfig::new_1d(grid_dim, block_dim);
         Ok(ssa::Kernel::new(instrs, args, cfg))
     }
 }
@@ -588,6 +630,12 @@ impl lang::op::Store {
                         B::Mul => 'm',
                         B::Div => 'd',
                         B::Mod => 'o',
+                        B::Eq => 'e',
+                        B::Ne => 'N',
+                        B::Lt => 'l',
+                        B::Le => 'L',
+                        B::Gt => 'g',
+                        B::Ge => 'G',
                     };
                     chars.push('B');
                     chars.push(c);
@@ -595,6 +643,14 @@ impl lang::op::Store {
                     walk(lhs, chars);
                     chars.push('_');
                     walk(rhs, chars);
+                }
+                A::Where { cond, on_true, on_false } => {
+                    chars.push('W');
+                    walk(cond, chars);
+                    chars.push('_');
+                    walk(on_true, chars);
+                    chars.push('_');
+                    walk(on_false, chars);
                 }
                 A::Load { src: _, layout: _ } => chars.push('O'),
                 A::Reduce { op, arg, dim: _ } => {
@@ -652,6 +708,9 @@ impl lang::op::Store {
                             broadcasted_dims.len() >= ast.shape.rank()
                         }
                     }
+                }
+                A::Where { cond, on_true, on_false } => {
+                    walk(cond) && walk(on_true) && walk(on_false)
                 }
                 A::Const(_) | A::Id { .. } => true,
             }
@@ -711,6 +770,11 @@ impl lang::op::Store {
                             }
                         }
                     }
+                }
+                A::Where { cond, on_true, on_false } => {
+                    walk(cond, adjs);
+                    walk(on_true, adjs);
+                    walk(on_false, adjs);
                 }
                 A::Const(_) | A::Id { .. } => {}
             }

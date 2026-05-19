@@ -14,5 +14,6 @@ fn lb_metal_mm() -> Result<()> {
 
 #[test]
 fn lb_metal_cat() -> Result<()> {
-    ug::common_tests::lb::cat(&ug::CpuDevice)
+    let dev = ug_metal::Device::new()?;
+    ug::common_tests::lb::cat(&dev)
 }
