@@ -21,3 +21,16 @@ model.safetensors
 flamegraph.svg
 trace*.json
 report*sqlite
+
+# Auto-added by Nuvai session-start-governance-check
+.nuvai/reports
+.nuvai/governance-check.ts
+.DS_Store
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
