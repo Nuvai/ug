@@ -1,5 +1,5 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_foundation::{NSArray, NSRange, NSString};
+use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
