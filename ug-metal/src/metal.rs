@@ -1,10 +1,11 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_foundation::{NSRange, NSString};
+use objc2_foundation::{NSArray, NSRange, NSString};
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDataType,
-    MTLDevice, MTLFunction, MTLFunctionConstantValues, MTLLibrary, MTLResource, MTLResourceOptions,
-    MTLResourceUsage, MTLSize,
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCopyAllDevices,
+    MTLCreateSystemDefaultDevice, MTLDataType, MTLDevice, MTLFunction,
+    MTLFunctionConstantValues, MTLLibrary, MTLResource, MTLResourceOptions, MTLResourceUsage,
+    MTLSize,
 };
 use std::{borrow::Cow, ffi::c_void, ptr};
 
@@ -245,7 +246,8 @@ impl Device {
     }
 
     pub fn all() -> Vec<Self> {
-        MTLCreateSystemDefaultDevice().into_iter().map(|raw| Device { raw }).collect()
+        let devices = MTLCopyAllDevices();
+        (0..devices.count()).map(|i| Device { raw: devices.objectAtIndex(i) }).collect()
     }
 
     pub fn system_default() -> Option<Self> {
@@ -282,7 +284,7 @@ impl Device {
         let raw = self
             .as_ref()
             .newLibraryWithSource_options_error(&NSString::from_str(source), options)
-            .unwrap();
+            .map_err(|e| Error::Msg(format!("Metal shader compilation failed: {e}")))?;
 
         Ok(Library::new(raw))
     }
@@ -371,7 +373,7 @@ impl Library {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     USize(usize),
     Bool(bool),
@@ -406,7 +408,7 @@ impl Value {
 /// Not true, good enough for our purposes.
 impl Eq for Value {}
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstantValues(Vec<(usize, Value)>);
 
 impl ConstantValues {

@@ -5,6 +5,7 @@ use ug::{lang::LaunchConfig, Result};
 use ug_metal::runtime::{Func, Slice};
 
 const CAT_M: &str = include_str!("cat.metal");
+const CAUSAL_MASK_M: &str = include_str!("causal_mask.metal");
 const ROPE_M: &str = include_str!("rope.metal");
 const ROPEI_M: &str = include_str!("ropei.metal");
 const SOFTMAX_M: &str = include_str!("softmax.metal");
@@ -177,7 +178,36 @@ impl crate::Device for ug_metal::runtime::Device {
         LB::custom(f, vec![src.clone()], src.shape(), src.dtype(), src.device())
     }
 
-    fn causal_mask(_: &LB<Self>) -> Result<LB<Self>> {
-        ug::bail!("causal_mask is not yet implemented for the cuda backend")
+    fn causal_mask(src: &LB<Self>) -> Result<LB<Self>> {
+        static CAUSAL_MASK: OnceLock<Func> = OnceLock::new();
+        let device = src.device();
+        let (_b_sz, _num_heads, s1, s2) = src.dims4()?;
+        let num_elements = src.shape().num_elements();
+        let n_rows = num_elements / (s1 * s2);
+        let cfg = LaunchConfig { grid_dim: n_rows as u32, block_dim: 32, shared_mem: 0 };
+        let func = CAUSAL_MASK
+            .get_or_init(|| device.compile_metal(CAUSAL_MASK_M, "causal_mask_f32", cfg).unwrap());
+        let device = device.clone();
+        let f = move |vs: Vec<&mut Slice>| -> Result<()> {
+            let [src, dst]: [&mut Slice; 2] = vs.try_into().unwrap();
+            let cb = device.new_command_buffer()?;
+            let encoder = &mut cb.compute_command_encoder();
+            let pl = func.pipeline()?;
+            encoder.set_compute_pipeline_state(&pl);
+            ug_metal::set_params!(
+                encoder,
+                (&*src, &*dst, num_elements as u32, s1 as u32, s2 as u32)
+            );
+            let grid_size = MTLSize { width: cfg.grid_dim as usize, height: 1, depth: 1 };
+            let threadgroup_size = MTLSize { width: cfg.block_dim as usize, height: 1, depth: 1 };
+            encoder.use_resource(src.buffer(), MTLResourceUsage::Read);
+            encoder.use_resource(dst.buffer(), MTLResourceUsage::Write);
+            encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+            encoder.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+            Ok(())
+        };
+        LB::custom(f, vec![src.clone()], src.shape(), src.dtype(), src.device())
     }
 }

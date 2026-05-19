@@ -5,7 +5,8 @@ use crate::metal::{
 use crate::set_params;
 use crate::utils::EncoderParam;
 use objc2_metal::{MTLCompileOptions, MTLResourceOptions, MTLResourceUsage, MTLSize};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use ug::{Error, Result};
 
 const MLX_GEMM: &str = include_str!("mlx_gemm.metal");
@@ -137,12 +138,18 @@ impl ug::Device for Device {
         lhs_l: &ug::Layout,
         rhs_l: &ug::Layout,
     ) -> Result<()> {
+        let gemm_dtype = match lhs.dtype {
+            ug::DType::BF16 => GemmDType::BF16,
+            ug::DType::F16 => GemmDType::F16,
+            ug::DType::F32 => GemmDType::F32,
+            dt => ug::bail!("unsupported dtype for metal matmul: {dt:?}"),
+        };
         let cb = self.new_command_buffer()?;
         let encoder = &mut cb.compute_command_encoder();
         call_mlx_gemm(
             &dst.device,
             encoder,
-            GemmDType::F32,
+            gemm_dtype,
             bmnk,
             lhs_l.strides(),
             lhs_l.offset(),
@@ -171,9 +178,10 @@ impl ug::Device for Device {
     }
 
     fn synchronize(&self) -> Result<()> {
-        // cb.commit();
-        // cb.wait_until_completed();
-        todo!()
+        let cb = self.new_command_buffer()?;
+        cb.commit();
+        cb.wait_until_completed();
+        Ok(())
     }
 
     unsafe fn allocate_uninit(&self, dtype: ug::DType, len: usize) -> Result<Self::Slice> {
@@ -420,7 +428,6 @@ fn call_mlx_gemm(
         (GemmDType::F16, true, true) => "gemm_tt_f16_f16_32_32_16_2_2",
     };
 
-    // TODO: Avoid recompiling the code for each matmul.
     let lib = LIB.get_or_init(|| {
         device.device.new_library_with_source(MLX_GEMM, Some(&MTLCompileOptions::new()))
     });
@@ -428,9 +435,26 @@ fn call_mlx_gemm(
         Ok(lib) => lib,
         Err(err) => ug::bail!("error compiling the gemm kernels {err}"),
     };
-    let func = lib.get_function(name, constants.as_ref())?;
 
-    let pipeline = device.device.new_compute_pipeline_state_with_function(&func)?;
+    type PipelineCache = Mutex<HashMap<(String, Option<ConstantValues>), ComputePipeline>>;
+    static PIPELINE_CACHE: OnceLock<PipelineCache> = OnceLock::new();
+    let cache = PIPELINE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache_key = (name.to_string(), constants.clone());
+    let pipeline = {
+        let guard = cache.lock().map_err(|e| Error::Msg(format!("pipeline cache lock: {e}")))?;
+        guard.get(&cache_key).cloned()
+    };
+    let pipeline = match pipeline {
+        Some(p) => p,
+        None => {
+            let func = lib.get_function(name, constants.as_ref())?;
+            let p = device.device.new_compute_pipeline_state_with_function(&func)?;
+            let mut guard =
+                cache.lock().map_err(|e| Error::Msg(format!("pipeline cache lock: {e}")))?;
+            guard.insert(cache_key, p.clone());
+            p
+        }
+    };
     encoder.set_compute_pipeline_state(&pipeline);
 
     impl EncoderParam for GemmParams {
