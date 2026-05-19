@@ -68,6 +68,46 @@ impl Device {
         create_command_buffer(&self.cq)
     }
 
+    pub fn run_batched(&self, ops: &[&Func], args: &mut [&mut [&mut Slice]]) -> Result<()> {
+        if ops.len() != args.len() {
+            ug::bail!(
+                "run_batched: ops count {} != args count {}",
+                ops.len(),
+                args.len()
+            );
+        }
+        let command_buffers: Vec<CommandBuffer> = ops
+            .iter()
+            .zip(args.iter_mut())
+            .map(|(f, op_args)| {
+                let cb = self.new_command_buffer()?;
+                cb.enqueue();
+                let encoder = &mut cb.compute_command_encoder();
+                let pl = f.pipeline()?;
+                encoder.set_compute_pipeline_state(&pl);
+                for (index, arg) in op_args.iter().enumerate() {
+                    <&Buffer>::set_param(&encoder, index, &arg.buffer);
+                    encoder.use_resource(&arg.buffer, MTLResourceUsage::Read);
+                    encoder.use_resource(&arg.buffer, MTLResourceUsage::Write);
+                }
+                let grid_size =
+                    MTLSize { width: f.launch_config.grid_dim as usize, height: 1, depth: 1 };
+                let threadgroup_size =
+                    MTLSize { width: f.launch_config.block_dim as usize, height: 1, depth: 1 };
+                encoder.dispatch_thread_groups(grid_size, threadgroup_size);
+                encoder.end_encoding();
+                Ok(cb)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for cb in &command_buffers {
+            cb.commit();
+        }
+        if let Some(last) = command_buffers.last() {
+            last.wait_until_completed();
+        }
+        Ok(())
+    }
+
     pub fn new() -> Result<Self> {
         let device = crate::metal::Device::system_default()
             .ok_or(Error::Msg("No default device found".to_string()))?;
